@@ -1,141 +1,312 @@
-import { Service, PlatformAccessory, CharacteristicValue } from 'homebridge';
-
-import { ExampleHomebridgePlatform } from './platform';
+import axios from 'axios';
+import { NestPlatform } from './platform';
+import { PlatformAccessory, Service } from 'homebridge';
+import { PubSub } from '@google-cloud/pubsub';
 
 /**
- * Platform Accessory
- * An instance of this class is created for each accessory your platform registers
- * Each accessory may expose multiple services of different service types.
- */
-export class ExamplePlatformAccessory {
-  private service: Service;
-
-  /**
-   * These are just used to create a working example
-   * You should implement your own code to track the state of your accessory
-   */
-  private exampleStates = {
-    On: false,
-    Brightness: 100,
-  };
-
-  constructor(
-    private readonly platform: ExampleHomebridgePlatform,
-    private readonly accessory: PlatformAccessory,
-  ) {
-
-    // set accessory information
-    this.accessory.getService(this.platform.Service.AccessoryInformation)!
-      .setCharacteristic(this.platform.Characteristic.Manufacturer, 'Default-Manufacturer')
-      .setCharacteristic(this.platform.Characteristic.Model, 'Default-Model')
-      .setCharacteristic(this.platform.Characteristic.SerialNumber, 'Default-Serial');
-
-    // get the LightBulb service if it exists, otherwise create a new LightBulb service
-    // you can create multiple services for each accessory
-    this.service = this.accessory.getService(this.platform.Service.Lightbulb) || this.accessory.addService(this.platform.Service.Lightbulb);
-
-    // set the service name, this is what is displayed as the default name on the Home app
-    // in this example we are using the name we stored in the `accessory.context` in the `discoverDevices` method.
-    this.service.setCharacteristic(this.platform.Characteristic.Name, accessory.context.device.exampleDisplayName);
-
-    // each service must implement at-minimum the "required characteristics" for the given service type
-    // see https://developers.homebridge.io/#/service/Lightbulb
-
-    // register handlers for the On/Off Characteristic
-    this.service.getCharacteristic(this.platform.Characteristic.On)
-      .onSet(this.setOn.bind(this))                // SET - bind to the `setOn` method below
-      .onGet(this.getOn.bind(this));               // GET - bind to the `getOn` method below
-
-    // register handlers for the Brightness Characteristic
-    this.service.getCharacteristic(this.platform.Characteristic.Brightness)
-      .onSet(this.setBrightness.bind(this));       // SET - bind to the 'setBrightness` method below
+* Platform Accessory
+* An instance of this class is created for each accessory your platform registers
+* Each accessory may expose multiple services of different service types.
+*/
+export class Thermostat {
+    private service: Service;
 
     /**
-     * Creating multiple services of the same type.
-     *
-     * To avoid "Cannot add a Service with the same UUID another Service without also defining a unique 'subtype' property." error,
-     * when creating multiple services of the same type, you need to use the following syntax to specify a name and subtype id:
-     * this.accessory.getService('NAME') || this.accessory.addService(this.platform.Service.Lightbulb, 'NAME', 'USER_DEFINED_SUBTYPE_ID');
-     *
-     * The USER_DEFINED_SUBTYPE must be unique to the platform accessory (if you platform exposes multiple accessories, each accessory
-     * can use the same sub type id.)
-     */
+    * These are just used to create a working example
+    * You should implement your own code to track the state of your accessory
+    */
+    private state = {
+        currentHeatingCooling: 0,
+        currentTemperature: -270,
+        targetHeatingCooling: 0,
+        targetTemperature: 10,
+        temperatureDisplayUnits: 0
+    };
 
-    // Example: add two "motion sensor" services to the accessory
-    const motionSensorOneService = this.accessory.getService('Motion Sensor One Name') ||
-      this.accessory.addService(this.platform.Service.MotionSensor, 'Motion Sensor One Name', 'YourUniqueIdentifier-1');
+    constructor(
+        private readonly platform: NestPlatform,
+        private readonly accessory: PlatformAccessory,
+    ) {
 
-    const motionSensorTwoService = this.accessory.getService('Motion Sensor Two Name') ||
-      this.accessory.addService(this.platform.Service.MotionSensor, 'Motion Sensor Two Name', 'YourUniqueIdentifier-2');
+        // set accessory information
+        this.accessory.getService(this.platform.Service.AccessoryInformation)!
+            .setCharacteristic(this.platform.Characteristic.Manufacturer, 'Nest')
+            .setCharacteristic(this.platform.Characteristic.Model, 'Learning Thermostat')
+            .setCharacteristic(this.platform.Characteristic.SerialNumber, this.accessory.context.device.serial_number)
 
-    /**
-     * Updating characteristics values asynchronously.
-     *
-     * Example showing how to update the state of a Characteristic asynchronously instead
-     * of using the `on('get')` handlers.
-     * Here we change update the motion sensor trigger states on and off every 10 seconds
-     * the `updateCharacteristic` method.
-     *
-     */
-    let motionDetected = false;
-    setInterval(() => {
-      // EXAMPLE - inverse the trigger
-      motionDetected = !motionDetected;
+        // create a new Thermostat service
+        this.service = this.accessory.getService(this.platform.Service.Thermostat) || this.accessory.addService(this.platform.Service.Thermostat);
 
-      // push the new value to HomeKit
-      motionSensorOneService.updateCharacteristic(this.platform.Characteristic.MotionDetected, motionDetected);
-      motionSensorTwoService.updateCharacteristic(this.platform.Characteristic.MotionDetected, !motionDetected);
+        // create handlers for required characteristics
+        this.service.getCharacteristic(this.platform.Characteristic.CurrentHeatingCoolingState)
+          .onGet(this.onGetCurrentHeatingCoolingState.bind(this));
 
-      this.platform.log.debug('Triggering motionSensorOneService:', motionDetected);
-      this.platform.log.debug('Triggering motionSensorTwoService:', !motionDetected);
-    }, 10000);
-  }
+        this.service.getCharacteristic(this.platform.Characteristic.TargetHeatingCoolingState)
+          .onGet(this.onGetHeatingCoolingState.bind(this))
+          .onSet(this.onSetHeatingCoolingState.bind(this));
 
-  /**
-   * Handle "SET" requests from HomeKit
-   * These are sent when the user changes the state of an accessory, for example, turning on a Light bulb.
-   */
-  async setOn(value: CharacteristicValue) {
-    // implement your own code to turn your device on/off
-    this.exampleStates.On = value as boolean;
+        this.service.getCharacteristic(this.platform.Characteristic.CurrentTemperature)
+          .onGet(this.onGetTemperature.bind(this));
 
-    this.platform.log.debug('Set Characteristic On ->', value);
-  }
+        this.service.getCharacteristic(this.platform.Characteristic.TargetTemperature)
+          .onGet(this.onGetTargetTemperature.bind(this))
+          .onSet(this.onSetTargetTemperature.bind(this));
 
-  /**
-   * Handle the "GET" requests from HomeKit
-   * These are sent when HomeKit wants to know the current state of the accessory, for example, checking if a Light bulb is on.
-   *
-   * GET requests should return as fast as possbile. A long delay here will result in
-   * HomeKit being unresponsive and a bad user experience in general.
-   *
-   * If your device takes time to respond you should update the status of your device
-   * asynchronously instead using the `updateCharacteristic` method instead.
+        this.service.getCharacteristic(this.platform.Characteristic.TemperatureDisplayUnits)
+          .onGet(this.onGetDisplayUnits.bind(this))
+          .onSet(this.onSetDisplayUnits.bind(this));
 
-   * @example
-   * this.service.updateCharacteristic(this.platform.Characteristic.On, true)
-   */
-  async getOn(): Promise<CharacteristicValue> {
-    // implement your own code to check if the device is on
-    const isOn = this.exampleStates.On;
+        this.connect();
+    }
 
-    this.platform.log.debug('Get Characteristic On ->', isOn);
+    connect = async () => {
+        try {
 
-    // if you need to return an error to show the device as "Not Responding" in the Home app:
-    // throw new this.platform.api.hap.HapStatusError(this.platform.api.hap.HAPStatus.SERVICE_COMMUNICATION_FAILURE);
+            // declare access token
+            const token = await this.platform.getAccessToken();
 
-    return isOn;
-  }
+            // fetch current state from thermostat
+            const url = this.getDeviceURL();
+            const { data } = await axios.get(url, {
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${token}`
+                }
+            });
+            this.platform.log.info('info fetched');
 
-  /**
-   * Handle "SET" requests from HomeKit
-   * These are sent when the user changes the state of an accessory, for example, changing the Brightness
-   */
-  async setBrightness(value: CharacteristicValue) {
-    // implement your own code to set the brightness
-    this.exampleStates.Brightness = value as number;
+            // update state with current thermostat values
+            this.state.currentHeatingCooling = this.heatingCoolingModeToInt(data.traits['sdm.devices.traits.ThermostatMode'].mode);
+            this.state.currentTemperature = data.traits['sdm.devices.traits.Temperature'].ambientTemperatureCelsius;
+            this.state.targetHeatingCooling = this.heatingCoolingStateToInt(data.traits['sdm.devices.traits.ThermostatHvac'].status);
+            this.state.targetTemperature = data.traits['sdm.devices.traits.ThermostatTemperatureSetpoint'].coolCelsius;
+            this.state.temperatureDisplayUnits = data.traits['sdm.devices.traits.Settings'].temperatureScale === 'FAHRENHEIT' ? 1 : 0;
 
-    this.platform.log.debug('Set Characteristic Brightness -> ', value);
-  }
+            // update accessory with new state valuesTargetHeatingCoolingState
+            this.service.updateCharacteristic(this.platform.Characteristic.CurrentHeatingCoolingState, this.state.currentHeatingCooling);
+            this.service.updateCharacteristic(this.platform.Characteristic.CurrentTemperature, this.state.currentTemperature);
+            this.service.updateCharacteristic(this.platform.Characteristic.TargetHeatingCoolingState, this.state.targetHeatingCooling);
+            this.service.updateCharacteristic(this.platform.Characteristic.TargetTemperature, this.state.targetTemperature);
+            this.service.updateCharacteristic(this.platform.Characteristic.TemperatureDisplayUnits, this.state.temperatureDisplayUnits);
+            this.platform.log.info('thermostat state set');
 
+            // subscribe to devices change events
+            const pubsub = new PubSub(this.platform.config.service_account);
+            const [topic] = await pubsub.createTopic('projects/sdm-prod/topics/enterprise-afe1d925-161d-4cdd-9947-6115089782fa');
+
+            const [subscription] = await topic.createSubscription('homebridge_system_events');
+            subscription.on('message', message => {
+                this.platform.log.info('Received message:', message.data.toString());
+            });
+            subscription.on('error', error => {
+                this.platform.log.error('Received error:', error);
+            });
+
+        } catch(e) {
+            this.platform.log.error(e.message);
+        }
+    }
+
+    getDeviceURL = () => {
+        return `https://smartdevicemanagement.googleapis.com/v1/enterprises/${this.platform.config.project_id}/devices/${this.accessory.context.device.device_id}`;
+    }
+
+    heatingCoolingModeToInt = mode => {
+        switch(mode) {
+            case 'OFF':
+            return 0;
+
+            case 'HEAT':
+            return 1;
+
+            case 'COOL':
+            return 2;
+
+            case 'AUTO':
+            return 3;
+
+            default:
+            return 0;
+        }
+    }
+
+    heatingCoolingModeToString = mode => {
+        switch(mode) {
+            case 0:
+            return 'OFF';
+
+            case 1:
+            return 'HEAT';
+
+            case 2:
+            return 'COOL';
+
+            case 3:
+            return 'HEATCOOL';
+
+            default:
+            return 'OFF';
+        }
+    }
+
+    heatingCoolingStateToInt = state => {
+        switch(state) {
+            case 'OFF':
+            return 0;
+
+            case 'HEATING':
+            return 1;
+
+            case 'COOLING':
+            return 2;
+
+            default:
+            return 0;
+        }
+    }
+
+    onGetCurrentHeatingCoolingState = () => {
+        return this.state.currentHeatingCooling;
+    }
+
+    onGetHeatingCoolingState = () => {
+        return this.state.targetHeatingCooling;
+    }
+
+    onSetHeatingCoolingState = async value => {
+        try {
+
+            // declare api url and access token
+            const url = this.getDeviceURL();
+            const token = await this.platform.getAccessToken();
+
+            /*
+            console.log({
+                command: 'sdm.devices.commands.ThermostatMode.SetMode',
+                params: {
+                    mode: this.heatingCoolingModeToString(value)
+                }
+            });
+            */
+
+            // send command to thermostat
+            await axios.post(`${url}:executeCommand`, {
+                command: 'sdm.devices.commands.ThermostatMode.SetMode',
+                params: {
+                    mode: this.heatingCoolingModeToString(value)
+                }
+            }, {
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${token}`
+                }
+            });
+
+            // update state with selection
+            this.state.currentHeatingCooling = value;
+            this.state.targetHeatingCooling = value;
+            this.service.updateCharacteristic(this.platform.Characteristic.CurrentHeatingCoolingState, value);
+            this.service.updateCharacteristic(this.platform.Characteristic.TargetHeatingCoolingState, value);
+
+        } catch(e) {
+            this.platform.log.error(`Unable to set target heating cooling state. ${e.message || 'An unknown error occurred'}`);
+        }
+    }
+
+    onGetTemperature = () => {
+        return this.state.currentTemperature;
+    }
+
+    onGetTargetTemperature = () => {
+        return this.state.targetTemperature;
+    }
+
+    getCurrentHeatingCoolingModeUrl = () => {
+        switch(this.state.currentHeatingCooling) {
+            case 1:
+            return 'sdm.devices.commands.ThermostatTemperatureSetpoint.SetHeat';
+
+            case 2:
+            return 'sdm.devices.commands.ThermostatTemperatureSetpoint.SetCool';
+
+            case 3:
+            return 'sdm.devices.commands.ThermostatTemperatureSetpoint.SetRange';
+        }
+        switch(this.state.targetHeatingCooling) {
+            case 1:
+            return 'sdm.devices.commands.ThermostatTemperatureSetpoint.SetHeat';
+
+            case 2:
+            return 'sdm.devices.commands.ThermostatTemperatureSetpoint.SetCool';
+
+            default:
+            return '';
+        }
+    }
+
+    onSetTargetTemperature = async value => {
+        try {
+
+            // declare api url and access token
+            const url = this.getDeviceURL();
+            const token = await this.platform.getAccessToken();
+
+            /*
+            console.log({
+                command: this.getCurrentHeatingCoolingModeUrl(),
+                params: {
+                    ...this.state.currentHeatingCooling === 1 && {
+                        heatCelsius: value
+                    },
+                    ...this.state.currentHeatingCooling === 2 && {
+                        coolCelsius: value
+                    },
+                    ...this.state.currentHeatingCooling === 3 && {
+                        coolCelsius: value,
+                        heatCelsius: value
+                    }
+                }
+            });
+            */
+
+            // send command to thermostat
+            this.platform.log.info(`setting temperature to ${value}`);
+            await axios.post(`${url}:executeCommand`, {
+                command: this.getCurrentHeatingCoolingModeUrl(),
+                params: {
+                    ...this.state.currentHeatingCooling === 1 && {
+                        heatCelsius: value
+                    },
+                    ...this.state.currentHeatingCooling === 2 && {
+                        coolCelsius: value
+                    },
+                    ...this.state.currentHeatingCooling === 3 && {
+                        coolCelsius: value,
+                        heatCelsius: value
+                    }
+                }
+            }, {
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${token}`
+                }
+            });
+
+            // update state with selection
+            this.state.targetTemperature = value;
+            this.service.updateCharacteristic(this.platform.Characteristic.TargetTemperature, value);
+
+        } catch(e) {
+            this.platform.log.error(`Unable to set target temperature. ${e.message || 'An unknown error occurred'}`);
+        }
+    }
+
+    onGetDisplayUnits = () => {
+        return this.state.temperatureDisplayUnits;
+    }
+
+    onSetDisplayUnits = value => {
+       this.state.temperatureDisplayUnits = value;
+       this.service.updateCharacteristic(this.platform.Characteristic.TemperatureDisplayUnits, value);
+    }
 }
